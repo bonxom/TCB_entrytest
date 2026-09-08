@@ -1,18 +1,16 @@
-import { createApp } from './app.js';
+import { handleFatalError } from './error/error-handling.js';
+import { startServer } from './startup.js';
 
-const host = process.env['HOST'] ?? '127.0.0.1';
-const port = Number(process.env['PORT'] ?? 3000);
-
-if (!Number.isInteger(port) || port < 1 || port > 65535) {
-  console.error('PORT must be an integer between 1 and 65535.');
-  process.exit(1);
+async function main(): Promise<void> {
+  const server = await startServer();
+  let stopping = false;
+  const shutdown = (): void => {
+    if (stopping) return;
+    stopping = true;
+    server.close();
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
-const server = createApp().listen(port, host, () => {
-  console.log(`Development scaffold listening at http://${host}:${port}`);
-});
-
-server.on('error', (error) => {
-  console.error('Could not start server:', error.message);
-  process.exitCode = 1;
-});
+void main().catch(handleFatalError);

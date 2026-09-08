@@ -12,7 +12,7 @@ installation is required. From the repository root, run:
 docker compose up --build
 ```
 
-Open `http://127.0.0.1:3000`. The current scaffold returns 404 for all paths;
+Open `http://127.0.0.1:3000`. The current scaffold returns a JSON `COMMON_0003` error (404) for all paths;
 job endpoints and `/healthz` are not implemented yet. Source and tests are mounted
 from your checkout; source changes restart the development server automatically.
 Dependencies stay inside the image, so host `node_modules` cannot overwrite the
@@ -29,9 +29,9 @@ docker compose down
 ```
 
 SQLite is embedded in the app container, so no separate database service is needed.
-The named `sqlite-data` volume is mounted at `/app/data`; Compose reserves
-`DATABASE_PATH=/app/data/jobs.sqlite` for the upcoming persistence implementation.
-The scaffold does not create an application database yet. `docker compose down`
+The named `sqlite-data` volume is mounted at `/app/data`; Compose sets
+`DATABASE_PATH=/app/data/jobs.sqlite`. Startup creates the parent directory, opens
+the database, and initializes the jobs table and index before accepting HTTP traffic. `docker compose down`
 keeps the volume; `docker compose down -v` deletes its data.
 
 An `.env` file is optional. Compose reads `PORT` (host port, default 3000) and `SEED`
@@ -56,7 +56,7 @@ SQLite is embedded; no database service or API key is needed. If a prebuilt SQLi
 addon is unavailable, installation requires Python 3 and a C/C++ build toolchain.
 
 The server listens at `http://127.0.0.1:3000` and reloads on source changes.
-Every path currently returns Express's default 404. Assessment endpoints are pending.
+Every path currently returns a JSON `COMMON_0003` error (404). Assessment endpoints are pending.
 
 The project pins pnpm 11.21.0 in `package.json`. `pnpm-lock.yaml` locks dependencies;
 Docker installs with `--frozen-lockfile`. `pnpm-workspace.yaml` allows install scripts
@@ -81,22 +81,73 @@ formatting checks. Use `pnpm run test:watch` for watch mode and `pnpm run format
 
 Dev and start load `.env` if present; existing shell variables take precedence.
 
-| Variable        | Default          | Purpose                                     |
-| --------------- | ---------------- | ------------------------------------------- |
-| `HOST`          | `127.0.0.1`      | Bind address                                |
-| `PORT`          | `3000`           | Integer port from 1 to 65535                |
-| `DATABASE_PATH` | Not consumed yet | Reserved; example uses `./data/jobs.sqlite` |
-| `SEED`          | Not consumed yet | Reserved for provider randomness            |
+| Variable        | Default              | Purpose                                             |
+| --------------- | -------------------- | --------------------------------------------------- |
+| `HOST`          | `127.0.0.1`          | Bind address                                        |
+| `PORT`          | `3000`               | Integer port from 1 to 65535                        |
+| `DATABASE_PATH` | `./data/jobs.sqlite` | SQLite file path, relative to the working directory |
+| `SEED`          | Not consumed yet     | Reserved for provider randomness                    |
+
+## Error handling
+
+Expected failures use `AppError` in `src/error/AppError.ts`, with a stable `code`, a
+client-safe `message`, and an explicit `statusCode`. HTTP responses use:
+
+```json
+{ "error": { "code": "COMMON_0003", "message": "Resource not found" } }
+```
+
+| Error              | HTTP mapping        | Meaning                                           |
+| ------------------ | ------------------- | ------------------------------------------------- |
+| `COMMON_0002`      | 400                 | Invalid request input                             |
+| `COMMON_0003`      | 404                 | Unknown resource or route                         |
+| `COMMON_0008`      | 500                 | Storage operation failed                          |
+| `COMMON_0004`      | 500                 | Invalid service configuration                     |
+| `COMMON_0005`      | 500                 | HTTP server could not bind/listen                 |
+| Unexpected failure | 500 / `COMMON_0001` | Generic client message; details logged internally |
+
+Define shared errors in `src/error/definition/common.ts` using `COMMON_ERROR`.
+Future domain-specific definitions belong in separate files under `definition/`.
+Construct failures with `new AppError(COMMON_ERROR.DATABASE_ERROR, { cause })`;
+`ErrorDefinition` requires `code`, `message`, and `statusCode`. Messages live in
+these definitions; diagnostic details belong in `cause` and are never returned.
+
+Routes and controllers will follow route → validation → controller → service →
+repository. Services throw typed errors; controllers forward failures with
+`next(error)`. Central error middleware is registered after routes and the 404
+fallback. HTTP 5xx errors are logged internally; causes and stacks are never
+included in JSON responses. AppError messages must therefore be safe for clients.
+
+Database adapters catch native errors only to wrap them in `AppError(COMMON_ERROR.DATABASE_ERROR)`, keeping
+`cause` for internal diagnostics. Startup rejects on configuration, database, or
+listen failures, and releases an opened database if initialization fails. These
+errors reach a single process boundary (`main().catch(handleFatalError)`), which
+logs and sets exit code 1; they cannot reach middleware before HTTP starts.
+Unexpected programming errors remain unexpected errors rather than being assigned
+an invented business classification. Provider/job error classification is pending.
 
 ## Structure and scope
 
 - `src/app.ts`: Express application factory.
-- `src/server.ts`: server entry point.
-- `tests/sqlite.test.ts`: SQLite dependency and file persistence smoke test.
+- `src/server.ts`: process entry point and shutdown signals.
+- `src/startup.ts`: database initialization and HTTP startup.
+- `src/error/AppError.ts`: shared application error class.
+- `src/error/ErrorDefinition.ts`: error definition contract.
+- `src/error/definition/common.ts`: common error codes, messages, and HTTP mappings.
+- `src/error/error-handler.ts`: central HTTP error mapping.
+- `src/error/error-handling.ts`: internal logging and fatal process boundary.
+- `src/database/`: file connection and transactional schema initialization.
+- `tests/sqlite.test.ts`: initialization, persistence across reopening, and schema constraints.
 
-The test verifies SQLite across reopening, not job persistence or process-crash
-recovery. Application schema initialization, job routes, validation, controllers,
-services, repositories, typed errors, provider stub, worker, accounting, callbacks,
+Startup fails if database initialization fails. The connection closes after the HTTP
+server closes on SIGINT/SIGTERM, or if HTTP startup fails. This does not yet provide
+worker shutdown or interrupted-job recovery. Schema initialization is repeatable
+using `CREATE TABLE/INDEX IF NOT EXISTS`; it does not upgrade existing tables. Future
+schema changes need migrations. Costs are integer micro-USD: one input token costs
+3 units and one output token costs 15 units; divide by 1,000,000 for USD.
+
+The tests do not cover worker recovery or the job API. Job routes, validation, controllers,
+services, repositories, provider stub, worker, accounting, callbacks,
 and reliability features are deferred because this step only sets up the coding
 environment. Provider error classification and job API contracts remain pending.
 
