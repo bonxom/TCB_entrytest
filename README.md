@@ -1,13 +1,4 @@
-# Async Summarization Service
-
-Node.js 22, strict TypeScript, Express 5 and embedded SQLite. Implements durable
-`POST /jobs`, asynchronous processing, `GET /jobs/:id` polling and `GET /healthz`.
-The real provider uses the official OpenAI SDK **Responses API**. A seeded local
-stub implements the assessment provider contract for offline runs.
-
 ## Run with Docker
-
-No local SQLite, Node or pnpm installation is needed.
 
 ```sh
 # Only if you do not already have .env:
@@ -18,7 +9,6 @@ docker compose up --build
 
 `BASE_URL` is the API base (for example `https://api.openai.com/v1`), not the full
 `/responses` endpoint. Your gateway and selected model must support Responses;
-there is no Chat Completions fallback. No live provider request is made at startup.
 
 For an offline assessment run without credentials:
 
@@ -41,13 +31,6 @@ server. The named `sqlite-data` volume holds `/app/data/jobs.sqlite` and its wor
 ownership sidecar. `docker compose down` preserves data; adding `-v` deletes it.
 Only one service process may own a database, even on different HTTP ports.
 
-Compose injects settings as environment variables. `.env` is excluded from the
-image; the optional local env-file loader may report it missing inside Docker,
-which does not mean Compose variables are missing. Source/tests are mounted read-only
-and `tsx watch` reloads source changes. Rebuild after dependency/configuration
-changes. This is a development image. Host port binds to localhost; override with
-`PORT=3001 docker compose up --build`.
-
 ## Local setup
 
 ```sh
@@ -61,15 +44,91 @@ cp .env.example .env
 AI_PROVIDER=stub pnpm run dev
 ```
 
-Node 22.20+ (22.x) is required. SQLite needs no standalone installation; building
-the native addon from source requires Python 3 and a C/C++ toolchain.
+Node 22.20+ (22.x) is required. SQLite needs no standalone installation;
+
+## How to run tests — The model provider
+
+Run from the project root. Tests use stubs/fakes; no API key or HTTP server is needed.
+
+What each test checks:
+
+- **Latency:** delays within 1,000–3,000 ms using simulated waits.
+- **Transient failure:** simulated 500 failures release occupied slots.
+- **Concurrency limit:** two calls stay in flight; the third is rejected with a 2s Retry-After.
+- **Invalid input:** empty text and text with 10,001 characters are rejected.
+- **Success response:** the Responses adapter returns the expected summary and usage from a fake response.
+- **Token counting:** 400 characters produce 100 input tokens and 20 output tokens.
+- **Determinism:** the same seed and call order produce identical delays and outcomes.
+- **Pricing:** 100 input + 20 output tokens cost USD 0.0006, without double charging.
+- **Concurrency demo:** three simultaneous stub calls print successful summaries and the rejected call's Retry-After.
+
+Some requirements share the same test, so their commands are identical.
+Choose either Local or Docker below; both run the same checks in the same order.
+
+**Current test failure:** `Responses wrapper sends` fails its retry assertion:
+`openai-client.ts` sets `maxRetries: 3`, while the test expects `0`. Agree on the
+retry policy before changing either. The listed stub tests and pricing test passed.
+
+**Local commands:**
 
 ```sh
-pnpm run check                 # typecheck, all tests, build, formatting
-pnpm test
-pnpm run test:watch
-pnpm run build
-pnpm start
+# Latency
+pnpm exec vitest run tests/providers.test.ts -t 'stub seeded runs'
+
+# Transient failure
+pnpm exec vitest run tests/providers.test.ts -t 'stub seeded runs'
+
+# Concurrency limit
+pnpm exec vitest run tests/providers.test.ts -t 'stub enforces two slots'
+
+# Invalid input
+pnpm exec vitest run tests/providers.test.ts -t 'stub enforces two slots'
+
+# Success response
+pnpm exec vitest run tests/providers.test.ts -t 'Responses wrapper sends'
+
+# Token counting
+pnpm exec vitest run tests/providers.test.ts -t 'stub enforces two slots'
+
+# Determinism
+pnpm exec vitest run tests/providers.test.ts -t 'stub seeded runs'
+
+# Pricing
+pnpm exec vitest run tests/jobs.test.ts -t 'atomic claims'
+
+# Concurrency demo
+pnpm exec tsx tests/manual/stub-concurrency.ts
+```
+
+**Docker commands:**
+
+```sh
+# Latency
+docker compose run --rm --no-deps app pnpm exec vitest run tests/providers.test.ts -t 'stub seeded runs'
+
+# Transient failure
+docker compose run --rm --no-deps app pnpm exec vitest run tests/providers.test.ts -t 'stub seeded runs'
+
+# Concurrency limit
+docker compose run --rm --no-deps app pnpm exec vitest run tests/providers.test.ts -t 'stub enforces two slots'
+
+# Invalid input
+docker compose run --rm --no-deps app pnpm exec vitest run tests/providers.test.ts -t 'stub enforces two slots'
+
+# Success response
+docker compose run --rm --no-deps app pnpm exec vitest run tests/providers.test.ts -t 'Responses wrapper sends'
+
+# Token counting
+docker compose run --rm --no-deps app pnpm exec vitest run tests/providers.test.ts -t 'stub enforces two slots'
+
+# Determinism
+docker compose run --rm --no-deps app pnpm exec vitest run tests/providers.test.ts -t 'stub seeded runs'
+
+# Pricing
+docker compose run --rm --no-deps app pnpm exec vitest run tests/jobs.test.ts -t 'atomic claims'
+
+# Concurrency demo
+docker compose run --rm --no-deps app pnpm exec tsx tests/manual/stub-concurrency.ts
 ```
 
 ## API
@@ -125,123 +184,23 @@ queued -> running -> succeeded | failed | dead
 | failed    | Confirmed permanent input rejection or refusal                                           |
 | dead      | One-attempt budget exhausted, interrupted execution, configuration or unexpected failure |
 
-This version permits **one attempt**, with no automatic retries or terminal requeue.
-429, timeout, network failure and provider 5xx become dead. Invalid/incomplete
-responses become dead too. Unsupported model/parameter and 401/403/404 are service
-configuration errors: current job becomes dead, worker stops claiming, GET remains
-available, POST and health return 503. Fix configuration and restart to resume queued
-jobs; terminal jobs stay terminal. Unknown HTTP 400 is not assumed to be invalid text.
+- **Attempts:** one per job, no automatic retry/requeue. Rate limits, timeouts, network/5xx errors and invalid responses become `dead`; unknown HTTP 400 is not assumed to be invalid input.
+- **Configuration errors:** mark the job `dead` and stop claims. POST/health return 503; GET remains available. Fix configuration and restart to resume queued jobs only.
+- **Persistence:** transactional claims and conditional finishes prevent duplicate local writes/accounting. DB failures shut down with exit code 1; recovery marks interrupted running jobs `dead`. No exactly-once guarantee; crashes can lose unpersisted results/usage.
+- **Shutdown:** SIGINT/SIGTERM stop new work, drain HTTP and the worker, then close DB and release ownership. SDK timeout: 30s; HTTP drain: 35s; Docker grace: 40s. Forced termination relies on restart recovery.
+- **Accounting:** use reported Responses usage or stub estimates, including reported usage on failures. Store `3 × input_tokens + 15 × output_tokens` in micro-USD; GET divides by 1,000,000 and labels it `assessment_rate`. This is not the model's invoice; missing usage does not mean a free call.
 
-A separate SQLite file `<real database path>.worker-lock.sqlite` holds a lifetime
-`BEGIN IMMEDIATE` transaction. Acquire it before schema initialization; bind HTTP
-before recovering interrupted `running` jobs to `dead` (`PROVIDER_0005`). Queued rows
-survive and resume. Never delete the sidecar to release a lock: SQLite/OS releases
-it when the owning connection/process closes. This supports a shared **local
-filesystem**, not NFS, hard-link aliases, distributed replicas or copied databases.
-Network calls never hold a transaction on the jobs database.
+### Extension B — production readiness status
 
-Claims and conditional finishes are transactional. A finish requires the matching
-running attempt, preventing duplicate outcome writes and accounting. A persistence
-failure halts the worker, drains HTTP and closes resources with exit code 1; restart
-recovers any remaining running job. There is **no exactly-once provider guarantee**:
-a crash after a billable call can lose the unpersisted result/usage.
+- **Idempotency — not implemented:** repeated POST requests create new jobs.
+- **Error classification/dead-lettering — partial:** input rejection becomes `failed`; other failures become persisted `dead` jobs after one attempt. No retry scheduling or redrive.
+- **Multiple workers — not implemented:** one sequential worker and one process owner per DB; atomic claims/finishes do not guarantee exactly-once provider execution.
+- **Backpressure/rate limiting — not implemented:** no queue cap or submission rate limit; the worker makes one provider call at a time.
+- **Graceful shutdown — implemented with limits:** drains active work before closing storage. Forced termination recovers running jobs as interrupted `dead` jobs; unpersisted results may be lost.
+- **Health/metrics — partial:** worker and SQLite readiness checks exist; dashboard metrics are not implemented.
+- **Token/cost accounting — partial:** reported usage and assessment-rate cost are persisted per job; service-wide totals are not exposed.
 
-SIGINT/SIGTERM stop new claims and HTTP acceptance, wait for in-flight HTTP and the
-worker, then close the DB and release ownership. SDK timeout is 30 seconds; HTTP
-drain is bounded at 35 seconds; Compose allows 40 seconds. Forced termination uses
-the interrupted-job recovery policy on restart.
+================================
 
-Tokens are actual reported usage for Responses and the specified estimates for
-the stub. Store integer micro-USD: `3 * input_tokens + 15 * output_tokens`; divide
-by 1,000,000 in GET. Accumulate reported usage even on failures. Missing usage adds
-zero **reported** units; it does not prove a failed call was free. Cost uses assessment
-rates, not your model's invoice; `cost_basis` makes that distinction explicit.
-
-Stub: seeded uniform 1–3s delay, ~15% transient failures, two in-flight slots,
-excess calls rejected with a 1–3s Retry-After, input tokens `ceil(length/4)` and
-output tokens `ceil(input_tokens*0.2)`. The current worker calls sequentially; the
-adapter's independent two-call limit is still enforced and tested.
-
-## Health and errors
-
-Healthy response: `{"status":"ok","checks":{"sqlite":"ok"}}`. Health checks worker
-readiness first, then reads jobs and executes a no-row update in an immediate
-transaction. It briefly takes a write lock with a 100ms busy timeout, restoring
-the previous timeout afterwards. It cannot prove a future write will fit on disk
-and does not probe the remote provider. HTTP responding with 503 is alive but not
-ready; this is a combined endpoint, not a separate liveness-only probe.
-
-HTTP errors use one envelope:
-
-```json
-{ "error": { "code": "JOB_0001", "message": "Invalid job input" } }
-```
-
-| Code        | HTTP | Meaning                                             |
-| ----------- | ---- | --------------------------------------------------- |
-| JOB_0001    | 400  | Invalid body, callback or UUID                      |
-| JOB_0002    | 400  | Malformed JSON                                      |
-| JOB_0003    | 413  | Body over limit                                     |
-| JOB_0004    | 415  | Wrong media type                                    |
-| JOB_0005    | 404  | Unknown job                                         |
-| JOB_0006    | 503  | Submission unavailable                              |
-| HEALTH_0001 | 503  | SQLite not ready                                    |
-| HEALTH_0002 | 503  | Worker not ready                                    |
-| COMMON_0001 | 500  | Unexpected HTTP error                               |
-| COMMON_0003 | 404  | Unknown route                                       |
-| COMMON_0004 | 500  | Invalid local configuration (startup failure)       |
-| COMMON_0005 | 500  | Bind/listen failure (startup failure)               |
-| COMMON_0006 | 500  | Database operation failed                           |
-| COMMON_0007 | 503  | Another process owns the database (startup failure) |
-
-Expected failures use `src/error/AppError.ts`; definitions live in
-`src/error/definition/`. Controllers forward to central middleware with `next(error)`.
-Provider failures are persisted asynchronously, never sent retroactively to POST.
-Logging only includes whitelisted error code/name; raw errors, causes, prompts and
-SDK responses are not logged. Morgan logs HTTP access metadata.
-
-## Environment
-
-Shell settings take precedence over the optional local `.env`.
-
-| Variable      | Default            | Purpose                                       |
-| ------------- | ------------------ | --------------------------------------------- |
-| HOST          | 127.0.0.1          | HTTP bind address; Compose uses 0.0.0.0       |
-| PORT          | 3000               | Local HTTP / Compose published host port      |
-| DATABASE_PATH | ./data/jobs.sqlite | Local DB; Compose fixes /app/data/jobs.sqlite |
-| AI_PROVIDER   | openai             | openai or offline stub                        |
-| API_KEY       | none               | Required for openai                           |
-| BASE_URL      | none               | Required HTTP(S) API base for openai          |
-| MODEL         | none               | Required Responses-compatible model           |
-| SEED          | 42                 | Integer seed for stub                         |
-
-## Scope and verification
-
-Tests cover submission/polling, validation, persistence, atomic claims/finishes,
-accounting, provider classifications, SDK requests with fake fetch, stub timing and
-concurrency, shutdown, recovery, and real competing processes. They use temporary
-DBs; no billable AI requests are made. Custom gateway compatibility is not live-tested.
-Schema initialization uses the existing table and `CREATE IF NOT EXISTS`; future
-schema changes need migrations.
-
-Source layout follows responsibility layers:
-
-```text
-src/
-  routes/         controllers/    services/       repositories/
-  validations/    middlewares/    types/          workers/
-  config/         ai/             database/       error/
-  app.ts          server.ts       startup.ts
-```
-
-HTTP flows through route → middleware/pure validation → controller → service →
-repository. `validations/jobValidation.ts` contains the pure wire parser and internal
-invariant checks; `middlewares/validateJob.ts` handles Express and typed locals.
-`ai/` owns provider transport, `workers/jobWorker.ts` owns polling and
-`workers/workerReadiness.ts` describes lifecycle readiness. The SQLite sidecar lock
-lives in `database/workerOwnership.ts`; `startup.ts` coordinates ownership and cleanup.
-`config/aiConfig.ts` reads environment settings. AppError/definitions and safe process
-logging stay in `error/`; HTTP error middleware lives in `middlewares/`.
-
-Deferred: retries/backoff, webhook delivery, idempotency, multiple workers, backpressure,
-authentication, metrics and an Extension C DESIGN.md. These are outside this iteration.
+"I ran out of time here, and this is what I would have
+done"

@@ -40,10 +40,12 @@ export function createStubProvider({
           throw new ProviderFailure(PROVIDER_ERROR.TEMPORARY_FAILURE, {
             kind: 'transient',
           });
+        // token count
         const inputTokens = Math.ceil(text.length / 4);
+        const outputTokens = Math.ceil(inputTokens * 0.2);
         return {
           summary: text.slice(0, 200),
-          usage: { inputTokens, outputTokens: Math.ceil(inputTokens * 0.2) },
+          usage: { inputTokens, outputTokens },
         };
       } finally {
         active--;
