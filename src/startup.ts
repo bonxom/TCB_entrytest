@@ -1,5 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { createApp } from './app.js';
+import { checkDatabaseReadiness } from './database/health.js';
+import { createHealthRouter } from './routes/health.js';
 import { openDatabase } from './database/connection.js';
 import { initializeDatabase } from './database/initialize.js';
 import { AppError } from './error/AppError.js';
@@ -34,7 +36,8 @@ export async function startServer(): Promise<Server> {
   let started = false;
   try {
     initializeDatabase(db);
-    const server = createServer(createApp());
+    const routes = createHealthRouter(() => checkDatabaseReadiness(db));
+    const server = createServer(createApp(routes));
     await listen(server, host, port);
     server.once('close', () => db.close());
     started = true;

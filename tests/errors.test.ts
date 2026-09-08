@@ -39,7 +39,7 @@ test('HTTP errors use a consistent envelope and hide unexpected details', async 
     for (const [path, status, code, message] of [
       ['/validation', 400, 'COMMON_0002', 'Invalid request input'],
       ['/missing', 404, 'COMMON_0003', 'Resource not found'],
-      ['/database', 500, 'COMMON_0008', 'Database operation failed'],
+      ['/database', 500, 'COMMON_0006', 'Database operation failed'],
       ['/unexpected', 500, 'COMMON_0001', 'Internal server error'],
     ] as const) {
       const response = await fetch(`${base}${path}`);

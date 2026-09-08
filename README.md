@@ -1,7 +1,7 @@
 # Async Summarization Service
 
 Development environment using Node.js 22, strict TypeScript, Express, and SQLite
-(`better-sqlite3`). Only the environment scaffold is implemented.
+(`better-sqlite3`). The environment scaffold and SQLite-backed health endpoint are implemented.
 
 ## Docker setup (recommended)
 
@@ -12,8 +12,8 @@ installation is required. From the repository root, run:
 docker compose up --build
 ```
 
-Open `http://127.0.0.1:3000`. The current scaffold returns a JSON `COMMON_0003` error (404) for all paths;
-job endpoints and `/healthz` are not implemented yet. Source and tests are mounted
+Open `http://127.0.0.1:3000/healthz` to check readiness.
+Job endpoints are not implemented yet; unknown paths return JSON 404. Source and tests are mounted
 from your checkout; source changes restart the development server automatically.
 Dependencies stay inside the image, so host `node_modules` cannot overwrite the
 Linux SQLite addon. After editing dependencies, configuration, or other files not
@@ -56,7 +56,7 @@ SQLite is embedded; no database service or API key is needed. If a prebuilt SQLi
 addon is unavailable, installation requires Python 3 and a C/C++ build toolchain.
 
 The server listens at `http://127.0.0.1:3000` and reloads on source changes.
-Every path currently returns a JSON `COMMON_0003` error (404). Assessment endpoints are pending.
+`GET /healthz` checks readiness. Job endpoints are pending.
 
 The project pins pnpm 11.21.0 in `package.json`. `pnpm-lock.yaml` locks dependencies;
 Docker installs with `--frozen-lockfile`. `pnpm-workspace.yaml` allows install scripts
@@ -88,6 +88,35 @@ Dev and start load `.env` if present; existing shell variables take precedence.
 | `DATABASE_PATH` | `./data/jobs.sqlite` | SQLite file path, relative to the working directory |
 | `SEED`          | Not consumed yet     | Reserved for provider randomness                    |
 
+## GET /healthz
+
+```sh
+curl -i http://127.0.0.1:3000/healthz
+```
+
+When ready, HTTP 200 returns:
+
+```json
+{ "status": "ok", "checks": { "sqlite": "ok" } }
+```
+
+This endpoint combines HTTP liveness with SQLite readiness. It uses the running
+server's database connection, starts an immediate transaction, reads from `jobs`,
+and executes an update matching zero rows. It verifies the table is accessible
+and a write transaction is allowed without modifying job data. A closed connection,
+missing table, read-only storage, or lock that exceeds the SQLite busy timeout
+returns HTTP 503 through the shared error middleware:
+
+```json
+{ "error": { "code": "HEALTH_0001", "message": "SQLite storage is not ready" } }
+```
+
+Responses include `Cache-Control: no-store`. A 503 indicates HTTP is responding but
+storage is not ready; this is not a separate liveness-only probe. The probe can
+briefly contend with writers and uses the connection's busy timeout (currently
+better-sqlite3's default 5 seconds). It does not guarantee future writes will succeed,
+detect all disk-capacity problems, or check provider/worker health.
+
 ## Error handling
 
 Expected failures use `AppError` in `src/error/AppError.ts`, with a stable `code`, a
@@ -101,7 +130,7 @@ client-safe `message`, and an explicit `statusCode`. HTTP responses use:
 | ------------------ | ------------------- | ------------------------------------------------- |
 | `COMMON_0002`      | 400                 | Invalid request input                             |
 | `COMMON_0003`      | 404                 | Unknown resource or route                         |
-| `COMMON_0008`      | 500                 | Storage operation failed                          |
+| `COMMON_0006`      | 500                 | Storage operation failed                          |
 | `COMMON_0004`      | 500                 | Invalid service configuration                     |
 | `COMMON_0005`      | 500                 | HTTP server could not bind/listen                 |
 | Unexpected failure | 500 / `COMMON_0001` | Generic client message; details logged internally |
