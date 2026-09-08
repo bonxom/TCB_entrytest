@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
@@ -81,7 +84,9 @@ test('invalid port rejects with AppError (CONFIGURATION_ERROR) before opening th
 test('HTTP bind failure rejects with AppError (SERVER_STARTUP_ERROR) and closes the database', async () => {
   const occupied = createServer().listen(0, '127.0.0.1');
   await once(occupied, 'listening');
-  const db = new Database(':memory:');
+  const directory = mkdtempSync(join(tmpdir(), 'startup-test-'));
+  const db = new Database(join(directory, 'jobs.sqlite'));
+  vi.stubEnv('AI_PROVIDER', 'stub');
   vi.spyOn(connection, 'openDatabase').mockReturnValue(db);
   vi.stubEnv('HOST', '127.0.0.1');
   vi.stubEnv('PORT', String((occupied.address() as AddressInfo).port));
@@ -93,11 +98,14 @@ test('HTTP bind failure rejects with AppError (SERVER_STARTUP_ERROR) and closes 
   } finally {
     if (db.open) db.close();
     await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test('schema failure rejects with AppError (DATABASE_ERROR) and closes the connection', async () => {
-  const db = new Database(':memory:');
+  const directory = mkdtempSync(join(tmpdir(), 'schema-test-'));
+  const db = new Database(join(directory, 'jobs.sqlite'));
+  vi.stubEnv('AI_PROVIDER', 'stub');
   db.exec('CREATE TABLE jobs (id TEXT)');
   vi.spyOn(connection, 'openDatabase').mockReturnValue(db);
   vi.stubEnv('PORT', '3000');
@@ -105,4 +113,5 @@ test('schema failure rejects with AppError (DATABASE_ERROR) and closes the conne
     COMMON_ERROR.DATABASE_ERROR,
   );
   expect(db.open).toBe(false);
+  rmSync(directory, { recursive: true, force: true });
 });

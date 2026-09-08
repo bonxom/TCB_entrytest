@@ -2,12 +2,13 @@ import { COMMON_ERROR } from './definition/common.js';
 import { AppError } from './AppError.js';
 
 export function logError(error: unknown): void {
-  console.error(
-    error instanceof AppError
-      ? error.code
-      : COMMON_ERROR.UNCATEGORIZED_EXCEPTION.code,
-    error,
-  );
+  console.error({
+    code:
+      error instanceof AppError
+        ? error.code
+        : COMMON_ERROR.UNCATEGORIZED_EXCEPTION.code,
+    name: error instanceof AppError ? 'AppError' : 'Error',
+  });
 }
 
 // Process boundary: startup errors cannot be sent through HTTP middleware.

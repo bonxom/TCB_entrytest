@@ -1,16 +1,11 @@
 import { handleFatalError } from './error/error-handling.js';
 import { startServer } from './startup.js';
-
 async function main(): Promise<void> {
-  const server = await startServer();
-  let stopping = false;
+  const service = await startServer();
   const shutdown = (): void => {
-    if (stopping) return;
-    stopping = true;
-    server.close();
+    void service.stop().catch(handleFatalError);
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 }
-
 void main().catch(handleFatalError);
