@@ -11,3 +11,7 @@ data
 *.log
 *.tsbuildinfo
 *.pdf
+
+.env
+.env.*
+!.env.example

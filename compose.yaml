@@ -2,12 +2,17 @@ services:
   app:
     build: .
     init: true
+    stop_grace_period: 40s
     ports:
       - '127.0.0.1:${PORT:-3000}:3000'
     environment:
       HOST: 0.0.0.0
       PORT: '3000'
       DATABASE_PATH: /app/data/jobs.sqlite
+      API_KEY: ${API_KEY:-}
+      BASE_URL: ${BASE_URL:-}
+      MODEL: ${MODEL:-}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
       SEED: ${SEED:-42}
     volumes:
       - ./src:/app/src:ro

@@ -1,183 +1,247 @@
 # Async Summarization Service
 
-Development environment using Node.js 22, strict TypeScript, Express, and SQLite
-(`better-sqlite3`). The environment scaffold and SQLite-backed health endpoint are implemented.
+Node.js 22, strict TypeScript, Express 5 and embedded SQLite. Implements durable
+`POST /jobs`, asynchronous processing, `GET /jobs/:id` polling and `GET /healthz`.
+The real provider uses the official OpenAI SDK **Responses API**. A seeded local
+stub implements the assessment provider contract for offline runs.
 
-## Docker setup (recommended)
+## Run with Docker
 
-Install Docker Engine/Desktop with Docker Compose. No local Node.js, pnpm, or SQLite
-installation is required. From the repository root, run:
+No local SQLite, Node or pnpm installation is needed.
 
 ```sh
+# Only if you do not already have .env:
+cp .env.example .env
+# Set API_KEY, BASE_URL and MODEL in .env, then:
 docker compose up --build
 ```
 
-Open `http://127.0.0.1:3000/healthz` to check readiness.
-Job endpoints are not implemented yet; unknown paths return JSON 404. Source and tests are mounted
-from your checkout; source changes restart the development server automatically.
-Dependencies stay inside the image, so host `node_modules` cannot overwrite the
-Linux SQLite addon. After editing dependencies, configuration, or other files not
-mounted by Compose, rebuild with `docker compose up --build`.
+`BASE_URL` is the API base (for example `https://api.openai.com/v1`), not the full
+`/responses` endpoint. Your gateway and selected model must support Responses;
+there is no Chat Completions fallback. No live provider request is made at startup.
+
+For an offline assessment run without credentials:
 
 ```sh
-# Run all checks inside Docker, even when the app is not running.
+AI_PROVIDER=stub docker compose up --build
+```
+
+`AI_PROVIDER` is optional: the default is `openai`; `stub` selects the local
+assessment simulator. You only need `API_KEY`, `BASE_URL`, and `MODEL` for real AI.
+Tests inject fakes and never use your key.
+
+```sh
 docker compose run --rm --no-deps app pnpm run check
-# Follow server logs.
 docker compose logs -f app
-# Stop and remove containers; keep the SQLite volume.
 docker compose down
 ```
 
-SQLite is embedded in the app container, so no separate database service is needed.
-The named `sqlite-data` volume is mounted at `/app/data`; Compose sets
-`DATABASE_PATH=/app/data/jobs.sqlite`. Startup creates the parent directory, opens
-the database, and initializes the jobs table and index before accepting HTTP traffic. `docker compose down`
-keeps the volume; `docker compose down -v` deletes its data.
+SQLite runs **inside the app process**, through `better-sqlite3`, not as a separate
+server. The named `sqlite-data` volume holds `/app/data/jobs.sqlite` and its worker
+ownership sidecar. `docker compose down` preserves data; adding `-v` deletes it.
+Only one service process may own a database, even on different HTTP ports.
 
-An `.env` file is optional. Compose reads `PORT` (host port, default 3000) and `SEED`
-(default 42) from the shell or `.env`. For example, use
-`PORT=3001 docker compose up --build` if port 3000 is occupied. Inside the container,
-Compose sets `HOST=0.0.0.0` and `PORT=3000`; the published host port binds only to
-localhost. This Dockerfile is a development environment, not a production image.
+Compose injects settings as environment variables. `.env` is excluded from the
+image; the optional local env-file loader may report it missing inside Docker,
+which does not mean Compose variables are missing. Source/tests are mounted read-only
+and `tsx watch` reloads source changes. Rebuild after dependency/configuration
+changes. This is a development image. Host port binds to localhost; override with
+`PORT=3001 docker compose up --build`.
 
-## Local setup (alternative)
+## Local setup
 
 ```sh
 nvm install
 nvm use
 npm install --global pnpm@11.21.0
 pnpm install --frozen-lockfile
+# Only if .env does not exist:
 cp .env.example .env
-pnpm run dev
+# Fill the AI settings, or select the stub:
+AI_PROVIDER=stub pnpm run dev
 ```
 
-Without nvm, install Node.js 22.20.0 (or a newer Node 22 release) and npm first, then install the pinned pnpm version as above.
-SQLite is embedded; no database service or API key is needed. If a prebuilt SQLite
-addon is unavailable, installation requires Python 3 and a C/C++ build toolchain.
-
-The server listens at `http://127.0.0.1:3000` and reloads on source changes.
-`GET /healthz` checks readiness. Job endpoints are pending.
-
-The project pins pnpm 11.21.0 in `package.json`. `pnpm-lock.yaml` locks dependencies;
-Docker installs with `--frozen-lockfile`. `pnpm-workspace.yaml` allows install scripts
-for `better-sqlite3` and `esbuild`, which need native binaries. Use pnpm for all
-dependency changes (for example, `pnpm add <package>`). npm is only used to bootstrap pnpm.
-
-## Commands
+Node 22.20+ (22.x) is required. SQLite needs no standalone installation; building
+the native addon from source requires Python 3 and a C/C++ toolchain.
 
 ```sh
-pnpm run typecheck
+pnpm run check                 # typecheck, all tests, build, formatting
 pnpm test
+pnpm run test:watch
 pnpm run build
 pnpm start
-pnpm run format:check
-pnpm run check
 ```
 
-`pnpm start` requires a build. `pnpm run check` runs typechecking, tests, build, and
-formatting checks. Use `pnpm run test:watch` for watch mode and `pnpm run format` to format.
+## API
+
+```sh
+curl -i http://127.0.0.1:3000/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"A long article to summarize.","callback_url":"https://example.com/callback"}'
+# HTTP 202, Location: /jobs/<id>, body: {"id":"<uuid>"}
+
+curl http://127.0.0.1:3000/jobs/<id>
+curl http://127.0.0.1:3000/healthz
+```
+
+POST validates and commits the row **before** returning 202. It does not call or
+wait for AI. `text` must contain non-whitespace content and be at most 10,000
+UTF-16 code units (JavaScript string length); original text is preserved.
+`callback_url` is optional, HTTPS only, at most 2,048 characters, without credentials
+or fragments. It is normalized and **stored only; no webhook is sent**. Unknown
+fields are rejected. JSON body limit is 128 KiB; Content-Type must be application/json.
+
+GET returns HTTP 200 for every existing job, including terminal failures:
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "status": "succeeded",
+  "summary": "A concise summary.",
+  "error": null,
+  "attempts": 1,
+  "input_tokens": 100,
+  "output_tokens": 20,
+  "cost": 0.0006,
+  "cost_basis": "assessment_rate"
+}
+```
+
+Summary is null before success. Terminal errors have `{ "code": "PROVIDER_...",
+"message": "..." }`. GET excludes input text, callback URL and internal causes.
+Job and health responses use `Cache-Control: no-store`.
+
+## States, accounting and recovery
+
+```text
+queued -> running -> succeeded | failed | dead
+```
+
+| State     | Meaning                                                                                  |
+| --------- | ---------------------------------------------------------------------------------------- |
+| queued    | Persisted, waiting for worker; attempts = 0                                              |
+| running   | Atomically claimed; attempt incremented before provider call                             |
+| succeeded | Valid summary and reported usage persisted                                               |
+| failed    | Confirmed permanent input rejection or refusal                                           |
+| dead      | One-attempt budget exhausted, interrupted execution, configuration or unexpected failure |
+
+This version permits **one attempt**, with no automatic retries or terminal requeue.
+429, timeout, network failure and provider 5xx become dead. Invalid/incomplete
+responses become dead too. Unsupported model/parameter and 401/403/404 are service
+configuration errors: current job becomes dead, worker stops claiming, GET remains
+available, POST and health return 503. Fix configuration and restart to resume queued
+jobs; terminal jobs stay terminal. Unknown HTTP 400 is not assumed to be invalid text.
+
+A separate SQLite file `<real database path>.worker-lock.sqlite` holds a lifetime
+`BEGIN IMMEDIATE` transaction. Acquire it before schema initialization; bind HTTP
+before recovering interrupted `running` jobs to `dead` (`PROVIDER_0005`). Queued rows
+survive and resume. Never delete the sidecar to release a lock: SQLite/OS releases
+it when the owning connection/process closes. This supports a shared **local
+filesystem**, not NFS, hard-link aliases, distributed replicas or copied databases.
+Network calls never hold a transaction on the jobs database.
+
+Claims and conditional finishes are transactional. A finish requires the matching
+running attempt, preventing duplicate outcome writes and accounting. A persistence
+failure halts the worker, drains HTTP and closes resources with exit code 1; restart
+recovers any remaining running job. There is **no exactly-once provider guarantee**:
+a crash after a billable call can lose the unpersisted result/usage.
+
+SIGINT/SIGTERM stop new claims and HTTP acceptance, wait for in-flight HTTP and the
+worker, then close the DB and release ownership. SDK timeout is 30 seconds; HTTP
+drain is bounded at 35 seconds; Compose allows 40 seconds. Forced termination uses
+the interrupted-job recovery policy on restart.
+
+Tokens are actual reported usage for Responses and the specified estimates for
+the stub. Store integer micro-USD: `3 * input_tokens + 15 * output_tokens`; divide
+by 1,000,000 in GET. Accumulate reported usage even on failures. Missing usage adds
+zero **reported** units; it does not prove a failed call was free. Cost uses assessment
+rates, not your model's invoice; `cost_basis` makes that distinction explicit.
+
+Stub: seeded uniform 1–3s delay, ~15% transient failures, two in-flight slots,
+excess calls rejected with a 1–3s Retry-After, input tokens `ceil(length/4)` and
+output tokens `ceil(input_tokens*0.2)`. The current worker calls sequentially; the
+adapter's independent two-call limit is still enforced and tested.
+
+## Health and errors
+
+Healthy response: `{"status":"ok","checks":{"sqlite":"ok"}}`. Health checks worker
+readiness first, then reads jobs and executes a no-row update in an immediate
+transaction. It briefly takes a write lock with a 100ms busy timeout, restoring
+the previous timeout afterwards. It cannot prove a future write will fit on disk
+and does not probe the remote provider. HTTP responding with 503 is alive but not
+ready; this is a combined endpoint, not a separate liveness-only probe.
+
+HTTP errors use one envelope:
+
+```json
+{ "error": { "code": "JOB_0001", "message": "Invalid job input" } }
+```
+
+| Code        | HTTP | Meaning                                             |
+| ----------- | ---- | --------------------------------------------------- |
+| JOB_0001    | 400  | Invalid body, callback or UUID                      |
+| JOB_0002    | 400  | Malformed JSON                                      |
+| JOB_0003    | 413  | Body over limit                                     |
+| JOB_0004    | 415  | Wrong media type                                    |
+| JOB_0005    | 404  | Unknown job                                         |
+| JOB_0006    | 503  | Submission unavailable                              |
+| HEALTH_0001 | 503  | SQLite not ready                                    |
+| HEALTH_0002 | 503  | Worker not ready                                    |
+| COMMON_0001 | 500  | Unexpected HTTP error                               |
+| COMMON_0003 | 404  | Unknown route                                       |
+| COMMON_0004 | 500  | Invalid local configuration (startup failure)       |
+| COMMON_0005 | 500  | Bind/listen failure (startup failure)               |
+| COMMON_0006 | 500  | Database operation failed                           |
+| COMMON_0007 | 503  | Another process owns the database (startup failure) |
+
+Expected failures use `src/error/AppError.ts`; definitions live in
+`src/error/definition/`. Controllers forward to central middleware with `next(error)`.
+Provider failures are persisted asynchronously, never sent retroactively to POST.
+Logging only includes whitelisted error code/name; raw errors, causes, prompts and
+SDK responses are not logged. Morgan logs HTTP access metadata.
 
 ## Environment
 
-Dev and start load `.env` if present; existing shell variables take precedence.
+Shell settings take precedence over the optional local `.env`.
 
-| Variable        | Default              | Purpose                                             |
-| --------------- | -------------------- | --------------------------------------------------- |
-| `HOST`          | `127.0.0.1`          | Bind address                                        |
-| `PORT`          | `3000`               | Integer port from 1 to 65535                        |
-| `DATABASE_PATH` | `./data/jobs.sqlite` | SQLite file path, relative to the working directory |
-| `SEED`          | Not consumed yet     | Reserved for provider randomness                    |
+| Variable      | Default            | Purpose                                       |
+| ------------- | ------------------ | --------------------------------------------- |
+| HOST          | 127.0.0.1          | HTTP bind address; Compose uses 0.0.0.0       |
+| PORT          | 3000               | Local HTTP / Compose published host port      |
+| DATABASE_PATH | ./data/jobs.sqlite | Local DB; Compose fixes /app/data/jobs.sqlite |
+| AI_PROVIDER   | openai             | openai or offline stub                        |
+| API_KEY       | none               | Required for openai                           |
+| BASE_URL      | none               | Required HTTP(S) API base for openai          |
+| MODEL         | none               | Required Responses-compatible model           |
+| SEED          | 42                 | Integer seed for stub                         |
 
-## GET /healthz
+## Scope and verification
 
-```sh
-curl -i http://127.0.0.1:3000/healthz
+Tests cover submission/polling, validation, persistence, atomic claims/finishes,
+accounting, provider classifications, SDK requests with fake fetch, stub timing and
+concurrency, shutdown, recovery, and real competing processes. They use temporary
+DBs; no billable AI requests are made. Custom gateway compatibility is not live-tested.
+Schema initialization uses the existing table and `CREATE IF NOT EXISTS`; future
+schema changes need migrations.
+
+Source layout follows responsibility layers:
+
+```text
+src/
+  routes/         controllers/    services/       repositories/
+  validations/    middlewares/    types/          workers/
+  config/         ai/             database/       error/
+  app.ts          server.ts       startup.ts
 ```
 
-When ready, HTTP 200 returns:
+HTTP flows through route → middleware/pure validation → controller → service →
+repository. `validations/jobValidation.ts` contains the pure wire parser and internal
+invariant checks; `middlewares/validateJob.ts` handles Express and typed locals.
+`ai/` owns provider transport, `workers/jobWorker.ts` owns polling and
+`workers/workerReadiness.ts` describes lifecycle readiness. The SQLite sidecar lock
+lives in `database/workerOwnership.ts`; `startup.ts` coordinates ownership and cleanup.
+`config/aiConfig.ts` reads environment settings. AppError/definitions and safe process
+logging stay in `error/`; HTTP error middleware lives in `middlewares/`.
 
-```json
-{ "status": "ok", "checks": { "sqlite": "ok" } }
-```
-
-This endpoint combines HTTP liveness with SQLite readiness. It uses the running
-server's database connection, starts an immediate transaction, reads from `jobs`,
-and executes an update matching zero rows. It verifies the table is accessible
-and a write transaction is allowed without modifying job data. A closed connection,
-missing table, read-only storage, or lock that exceeds the SQLite busy timeout
-returns HTTP 503 through the shared error middleware:
-
-```json
-{ "error": { "code": "HEALTH_0001", "message": "SQLite storage is not ready" } }
-```
-
-Responses include `Cache-Control: no-store`. A 503 indicates HTTP is responding but
-storage is not ready; this is not a separate liveness-only probe. The probe can
-briefly contend with writers and uses the connection's busy timeout (currently
-better-sqlite3's default 5 seconds). It does not guarantee future writes will succeed,
-detect all disk-capacity problems, or check provider/worker health.
-
-## Error handling
-
-Expected failures use `AppError` in `src/error/AppError.ts`, with a stable `code`, a
-client-safe `message`, and an explicit `statusCode`. HTTP responses use:
-
-```json
-{ "error": { "code": "COMMON_0003", "message": "Resource not found" } }
-```
-
-| Error              | HTTP mapping        | Meaning                                           |
-| ------------------ | ------------------- | ------------------------------------------------- |
-| `COMMON_0002`      | 400                 | Invalid request input                             |
-| `COMMON_0003`      | 404                 | Unknown resource or route                         |
-| `COMMON_0006`      | 500                 | Storage operation failed                          |
-| `COMMON_0004`      | 500                 | Invalid service configuration                     |
-| `COMMON_0005`      | 500                 | HTTP server could not bind/listen                 |
-| Unexpected failure | 500 / `COMMON_0001` | Generic client message; details logged internally |
-
-Define shared errors in `src/error/definition/common.ts` using `COMMON_ERROR`.
-Future domain-specific definitions belong in separate files under `definition/`.
-Construct failures with `new AppError(COMMON_ERROR.DATABASE_ERROR, { cause })`;
-`ErrorDefinition` requires `code`, `message`, and `statusCode`. Messages live in
-these definitions; diagnostic details belong in `cause` and are never returned.
-
-Routes and controllers will follow route → validation → controller → service →
-repository. Services throw typed errors; controllers forward failures with
-`next(error)`. Central error middleware is registered after routes and the 404
-fallback. HTTP 5xx errors are logged internally; causes and stacks are never
-included in JSON responses. AppError messages must therefore be safe for clients.
-
-Database adapters catch native errors only to wrap them in `AppError(COMMON_ERROR.DATABASE_ERROR)`, keeping
-`cause` for internal diagnostics. Startup rejects on configuration, database, or
-listen failures, and releases an opened database if initialization fails. These
-errors reach a single process boundary (`main().catch(handleFatalError)`), which
-logs and sets exit code 1; they cannot reach middleware before HTTP starts.
-Unexpected programming errors remain unexpected errors rather than being assigned
-an invented business classification. Provider/job error classification is pending.
-
-## Structure and scope
-
-- `src/app.ts`: Express application factory.
-- `src/server.ts`: process entry point and shutdown signals.
-- `src/startup.ts`: database initialization and HTTP startup.
-- `src/error/AppError.ts`: shared application error class.
-- `src/error/ErrorDefinition.ts`: error definition contract.
-- `src/error/definition/common.ts`: common error codes, messages, and HTTP mappings.
-- `src/error/error-handler.ts`: central HTTP error mapping.
-- `src/error/error-handling.ts`: internal logging and fatal process boundary.
-- `src/database/`: file connection and transactional schema initialization.
-- `tests/sqlite.test.ts`: initialization, persistence across reopening, and schema constraints.
-
-Startup fails if database initialization fails. The connection closes after the HTTP
-server closes on SIGINT/SIGTERM, or if HTTP startup fails. This does not yet provide
-worker shutdown or interrupted-job recovery. Schema initialization is repeatable
-using `CREATE TABLE/INDEX IF NOT EXISTS`; it does not upgrade existing tables. Future
-schema changes need migrations. Costs are integer micro-USD: one input token costs
-3 units and one output token costs 15 units; divide by 1,000,000 for USD.
-
-The tests do not cover worker recovery or the job API. Job routes, validation, controllers,
-services, repositories, provider stub, worker, accounting, callbacks,
-and reliability features are deferred because this step only sets up the coding
-environment. Provider error classification and job API contracts remain pending.
-
-Follow `AGENTS.md` and the assessment PDF for application implementation.
+Deferred: retries/backoff, webhook delivery, idempotency, multiple workers, backpressure,
+authentication, metrics and an Extension C DESIGN.md. These are outside this iteration.

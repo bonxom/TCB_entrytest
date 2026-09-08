@@ -1,7 +1,7 @@
 import type { ErrorRequestHandler } from 'express';
-import { COMMON_ERROR } from './definition/common.js';
-import { AppError } from './AppError.js';
-import { logError } from './error-handling.js';
+import { COMMON_ERROR } from '../error/definition/common.js';
+import { AppError } from '../error/AppError.js';
+import { logError } from '../error/error-handling.js';
 
 export const errorHandler: ErrorRequestHandler = (
   error: unknown,

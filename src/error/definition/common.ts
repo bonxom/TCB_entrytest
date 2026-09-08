@@ -1,6 +1,11 @@
 import type { ErrorDefinition } from '../ErrorDefinition.js';
 
 export const COMMON_ERROR = {
+  INSTANCE_ALREADY_RUNNING: {
+    code: 'COMMON_0007',
+    message: 'Another worker owns this database',
+    statusCode: 503,
+  },
   UNCATEGORIZED_EXCEPTION: {
     code: 'COMMON_0001',
     message: 'Internal server error',

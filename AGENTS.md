@@ -43,9 +43,39 @@ Simple endpoints such as health checks may remain lightweight.
 
 Workers call services directly rather than going through HTTP controllers. Services may use provider adapters alongside repositories; those adapters own provider transport/stub behavior. Choose a framework compatible with the requested `next(error)` controller contract; Express is a reasonable default, not an assessment requirement.
 
+## Source directory organization
+
+Organize code by responsibility directly under `src/`; do not group job controllers,
+services, repositories, validation and workers into one feature directory.
+
+- `routes/`: endpoint registration and middleware/controller composition.
+- `controllers/`: validated HTTP input, service calls and HTTP responses; no repository, SQLite or SDK access.
+- `services/`: submission, querying, processing, transitions and accounting; no Express request/response types.
+- `repositories/`: SQL, row mapping, transactions and persistence; no HTTP or provider/retry policy.
+- `validations/`: pure input validation and normalization, without Express. `jobValidation.ts`
+  contains the wire parser (`callback_url` → `callbackUrl`) and a separate internal
+  invariant validator. Services call only the internal validator, never the wire parser.
+- `middlewares/`: Express adapters, typed locals, validation middleware and HTTP error handlers.
+- `types/`: shared domain types and contracts where needed. Keep provider-specific types next to their provider.
+- `workers/`: worker polling and lifecycle/readiness. Workers call the processing service directly.
+- `config/`: environment configuration parsing and validation.
+- `ai/`: provider interface, SDK client/adapters and assessment stub.
+- `database/`: connection, schema, storage checks and SQLite sidecar ownership mechanics
+  (`workerOwnership.ts`). Startup coordinates acquisition/release; worker network calls
+  never hold a transaction on the jobs database.
+- `error/`: AppError, ErrorDefinition, error definitions and safe process logging.
+
+Keep `app.ts`, `server.ts` and dependency composition in `startup.ts` directly under
+`src/`. Use descriptive camelCase filenames for refactored layer modules, such as
+`jobController.ts` and `jobService.ts`; retain unrelated existing filenames.
+Keep NodeNext `.js` import suffixes, avoid circular dependencies, and update test
+imports/mocks and documentation when moving files. Do not leave duplicate implementations
+or compatibility forwarding files. Create only directories with real responsibilities;
+no `models/` or generic `utils/` without a distinct need. Do not add forwarding layers.
+
 ## Typed errors and central error handling
 
-- Define expected failure types in a shared `errors.ts`, rooted in `AppError`, with a stable error code, message, and an explicit HTTP mapping contract.
+- Define expected failure types in `src/error/definition/`, rooted in `src/error/AppError.ts`, with a stable error code, message, and an explicit HTTP mapping contract.
 - Throw these typed errors for expected failures. Do not use arbitrary strings, generic errors, or ad hoc response objects for known application failures.
 - Controllers forward caught failures to `next(error)`; do not map errors to HTTP responses individually.
 - Register central error middleware after routes. It maps `AppError` instances to consistent HTTP status codes and JSON error responses.

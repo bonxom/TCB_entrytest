@@ -4,9 +4,9 @@ import Database from 'better-sqlite3';
 import { AppError } from '../error/AppError.js';
 import { COMMON_ERROR } from '../error/definition/common.js';
 
-export function openDatabase(): Database.Database {
+export function openDatabase(databasePath?: string): Database.Database {
   const filename = resolve(
-    process.env['DATABASE_PATH'] ?? './data/jobs.sqlite',
+    databasePath ?? process.env['DATABASE_PATH'] ?? './data/jobs.sqlite',
   );
 
   try {
