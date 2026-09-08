@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    init: true
+    ports:
+      - '127.0.0.1:${PORT:-3000}:3000'
+    environment:
+      HOST: 0.0.0.0
+      PORT: '3000'
+      DATABASE_PATH: /app/data/jobs.sqlite
+      SEED: ${SEED:-42}
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - sqlite-data:/app/data
+
+volumes:
+  sqlite-data:

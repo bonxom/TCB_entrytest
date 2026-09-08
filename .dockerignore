@@ -1,0 +1,16 @@
+.git
+.agents
+.codex
+node_modules
+dist
+coverage
+data
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+*.tsbuildinfo
+*.pdf

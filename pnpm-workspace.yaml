@@ -1,0 +1,6 @@
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+
+# Fail on stale dependencies instead of installing implicitly when running scripts.
+verifyDepsBeforeRun: error
